@@ -1,0 +1,52 @@
+---
+- name: "getting task {{ run_task_id }}"
+  block:
+    - name: get task
+      uri:
+        url: "{{ trackerbot.host }}/task/{{ run_task_id }}/"
+        method: GET
+      register: got_task
+
+    - set_fact:
+        run_task: "{{ got_task['json'] }}"
+
+- name: "get list of current PR and last commit statuses for commit {{ commit }}"
+  gh_commit:
+    sha: "{{ commit }}"
+    organization: "{{ github.organization }}"
+    token: "{{ github.token }}"
+    repo: "{{ github.repo }}"
+    command: read
+  register: commit_data
+
+- set_fact:
+    statuses: "{{ commit_data['meta']['statuses'] }}"
+    stream: "{{ run_task['stream'] }}"
+    states: {'pending': 'pending', 'failed': 'failure', 'invalid': 'error', 'passed': 'success', 'running': 'pending'}
+    statuses_updated: false
+
+- set_fact:
+    ci_stream: "ci/{{ stream }}"
+
+- name: iterate over statuses and match them with appropriate tasks
+  with_items: "{{ statuses }}"
+  loop_control:
+    loop_var: got_status
+  include_tasks: plays/update_status.yml
+  vars:
+    cur_status: "{{ got_status }}"
+
+- name: no matching commit status has been found, adding a new one
+  when: not statuses_updated
+  block:
+    - name: update status if it doesn't match to task status
+      gh_commit:
+        sha:  "{{ commit }}"
+        organization: "{{ github.organization }}"
+        token: "{{ github.token }}"
+        repo: "{{ github.repo }}"
+        command: set_status
+        status: {"state":"{{ states[run_task['result']] }}",
+                 "description": "{{ states[run_task['result']] }} #{{ run_id }}",
+                 "context": "{{ ci_stream }}"}
+      register: commit_data

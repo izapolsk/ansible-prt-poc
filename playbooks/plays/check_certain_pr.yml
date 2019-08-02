@@ -1,0 +1,144 @@
+---
+- set_fact:
+    pr_num: "{{ open_pr['number'] }}"
+
+- name: "get trackerbot pr {{ pr_num }}"
+  uri:
+    url: "{{ trackerbot.host }}/pr/?number={{ pr_num }}"
+    method: GET
+  register: got_pr
+
+- name: "PR {{ pr_num }} is present in trackerbot"
+  when: got_pr['json']['objects'] | length > 0
+  block:
+    - set_fact:
+        current_pr: "{{ got_pr['json']['objects'][0] }}"
+        wip: false
+
+    - name: get trackerbot run
+      uri:
+        url: "{{ trackerbot.host }}/run/?limit=1&order_by=-datestamp&pr__number={{ pr_num }}"
+        method: GET
+      register: got_run
+
+    - set_fact:
+        last_run: "{{ got_run['json']['objects'][0] }}"
+      when: got_run['json']['objects'] | length > 0
+
+    - name: if last run present
+      when: last_run is defined
+      block:
+        - name:  user requested reset
+          when:
+            - last_run.retest
+            - "'[WIP]' not in open_pr.title"
+          block:
+            - name: set old runs as invalid
+              include_tasks: plays/set_invalid_runs.yml
+
+            - name: create new run
+              include_tasks: plays/create_run.yml
+              vars:
+                last_commit: "{{ last_run.commit }}"
+
+        - name: "there is new commit {{ open_pr.head.sha }} added to PR {{ pr_num }}"
+          when:
+            - last_run.commit != open_pr.head.sha
+            - "'[WIP]' not in open_pr.title"
+          block:
+            - name: set old runs as invalid
+              include_tasks: plays/set_invalid_runs.yml
+
+            - name: create new run
+              include_tasks: plays/create_run.yml
+              vars:
+                last_commit: "{{ open_pr['head']['sha'] }}"
+
+    - name: when last run not present and WIP not in title
+      when:
+        - last_run is not defined
+        - "'[WIP]' not in open_pr.title"
+      block:
+        - name: create new run
+          include_tasks: plays/create_run.yml
+          vars:
+            last_commit: "{{ open_pr['head']['sha'] }}"
+
+    - name: "when WIP in title marking PR {{ pr_num }} as WIP"
+      when: "'[WIP]' in open_pr.title"
+      set_fact:
+        wip: true
+
+    - name: update PR in trackerbot
+      uri:
+        url: "{{ trackerbot.host }}/pr/{{ pr_num }}/"
+        method: PATCH
+        headers:
+          Content-Type: 'application/json'
+        body_format: json
+        body: {"current_commit_head":"{{ open_pr['head']['sha'] }}","wip":"{{ wip }}","title":"{{ open_pr['title'] }}","description":"{{ open_pr['body'] }}"}
+        status_code: 202
+        return_context: yes
+
+
+- name: PR is present in trackerbot
+  when: got_pr['json']['objects'] | length == 0
+  block:
+    - name: create new PR in trackerbot
+      uri:
+        url: "{{ trackerbot.host }}/pr/"
+        method: POST
+        headers:
+          Content-Type: 'application/json'
+        body_format: json
+        body: {"number": "{{ pr_num }}","description":"{{ open_pr['body'] }}","current_commit_head":"{{ open_pr['head']['sha'] }}","title":"{{ open_pr['title'] }}"}
+        status_code: 201
+        return_context: yes
+      register: new_pr
+
+    - name: create new test run
+      when:  "'[WIP]' not in open_pr.title"
+      include_tasks: plays/create_run.yml
+      vars:
+        last_commit: "{{ open_pr['head']['sha'] }}"
+
+    - name: update created PR
+      when: "'[WIP]' in open_pr.title"
+      uri:
+        url: "{{ trackerbot.host }}/pr/{{ pr_num }}/"
+        method: PATCH
+        headers:
+          Content-Type: 'application/json'
+        body_format: json
+        body: {"wip":true}
+        status_code: 202
+        return_context: yes
+
+- name: update PR status
+  block:
+    - set_fact:
+        current_pr: "{{ got_pr['json']['objects'][0] }}"
+
+    - block:
+        - name: get trackerbot runs
+          uri:
+            url: "{{ trackerbot.host }}/run/?pr__number={{ pr_num }}"
+            method: GET
+          register: got_runs
+
+        - set_fact:
+            commit: "{{ got_runs['json']['objects'][0]['commit'] }}"
+            run_id: "{{ got_runs['json']['objects'][0]['id'] }}"
+            task_ids: "{{ got_runs['json']['objects'][0]['tasks'] | map(attribute='tid')|list }}"
+
+        - name: iterate over tasks and compare statuses
+          with_items: "{{ task_ids }}"
+          loop_control:
+            loop_var: run_task_id
+          include_tasks: plays/update_pr_statuses.yml
+
+      when:
+        - "'[WIP]' not in open_pr.title"
+        - current_pr.runs is defined
+
+  when: got_pr['json']['objects'] | length > 0

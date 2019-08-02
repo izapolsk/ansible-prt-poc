@@ -1,0 +1,314 @@
+apiVersion: v1
+kind: Template
+labels:
+  template: prt-slave
+metadata:
+  name: prt-slave
+  annotations:
+    description: waits for PRT
+    tags: prt, prt-slave
+objects:
+- apiVersion: v1
+  kind: PersistentVolumeClaim
+  metadata:
+    name: "artifacts-pvc"
+  spec:
+    accessModes:
+    - ReadWriteMany
+    resources:
+      requests:
+        storage: "100Gi"
+    storageClassName: ""
+    volumeName: "artifacts-pv"
+
+- apiVersion: v1
+  kind: PersistentVolumeClaim
+  metadata:
+    name: "checkprs-pvc"
+  spec:
+    accessModes:
+    - ReadWriteMany
+    resources:
+      requests:
+        storage: "10Gi"
+
+- apiVersion: v1
+  kind: ServiceAccount
+  metadata:
+    name: prt
+
+- apiVersion: v1
+  kind: ImageStream
+  metadata:
+    name: ${NAME}
+    annotations:
+      description: ""
+      openshift.io/image.insecureRepository: "true"
+  spec:
+    lookupPolicy:
+      local: true
+
+- apiVersion: v1
+  kind: ConfigMap
+  metadata:
+    name: prt-configs
+  data:
+    variables: |
+      base_dir: /cfme
+
+      cfme_repo: https://github.com/ManageIQ/integration_tests.git
+      cfme_branch: master
+      cfme_repo_dir: "{{ base_dir }}/cfme_tests"
+
+      cfme_data_repo: https://gitlab.cee.redhat.com/cfme-qe/cfme-qe-yamls.git
+      cfme_data_branch: master
+      cfme_data_dir: "{{ base_dir }}/cfme-qe-yamls"
+
+      cfme_venv: "{{ base_dir }}/cfme_venv"
+      log_depot: "{{ base_dir }}/log_depot"
+
+      artifactor:
+        host: 127.0.0.1
+        port: 55555
+        local_dir: "{{ cfme_repo_dir }}/log"
+        remote_dir: ""
+
+      wharf:
+        host: http://wharf_host:4899/
+
+      wheel:
+        url: http://trackerbot_host/wheelhouse/
+        host: trackerbot_host
+
+      trackerbot:
+        host: http://trackerbot_host/api
+        username: "{{ lookup('env','TRACKERBOT_USER') }}"
+        apikey: "{{ lookup('env','TRACKERBOT_TOKEN') }}"
+
+      github:
+        organization: ManageIQ
+        token: "{{ lookup('env','GH_TOKEN') }}"
+        repo: integration_tests
+
+      sprout:
+        host: sprout_host
+        port: 80
+        user: "{{ lookup('env','SPROUT_USER') }}"
+        password: "{{ lookup('env','SPROUT_PASSWORD') }}"
+
+      browser: chrome
+
+      smtp: 25
+      json: 5555
+
+      slave_name: "{{ lookup('env','HOSTNAME') }}"
+
+- apiVersion: v1
+  kind: BuildConfig
+  metadata:
+    name: ${NAME}
+    annotations:
+      description: Building prt-slave image
+      template.alpha.openshift.io/wait-for-ready: "true"
+  spec:
+    output:
+      to:
+        kind: ImageStreamTag
+        name: "${NAME}:latest"
+    source:
+      type: Git
+      git:
+        uri: "${SOURCE_REPOSITORY_URL}"
+        ref: "${SOURCE_REPOSITORY_REF}"
+      contextDir: ""
+      images:
+    triggers:
+      - type: ConfigChange
+    strategy:
+      dockerStrategy:
+        noCache: true
+        env:
+        - name: "GIT_SSL_NO_VERIFY"
+          value: "true"
+
+- apiVersion: v1
+  kind: DeploymentConfig
+  metadata:
+    name: ${NAME}
+    annotations:
+      description: Deploys PRT slaves and appropriate jobs
+  spec:
+    strategy:
+      type: Recreate
+    triggers:
+    - type: ConfigChange
+    replicas: 10
+    selector:
+      name: ${NAME}
+    template:
+      metadata:
+        name: ${NAME}
+        labels:
+          name: ${NAME}
+      spec:
+        securityContext: {}
+        serviceAccount: prt
+        serviceAccountName: prt
+        containers:
+        - name: ${NAME}
+          image: "${NAME}:latest"
+          env:
+            - name: CFME_TESTS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: credentials
+                  key: .yaml_key
+            - name: YAYCL_CRYPT_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: credentials
+                  key: .yaml_key
+            - name: TRACKERBOT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: credentials
+                  key: TRACKERBOT_USER
+            - name: TRACKERBOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: credentials
+                  key: TRACKERBOT_TOKEN
+            - name: GH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: credentials
+                  key: GH_TOKEN
+            - name: SPROUT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: credentials
+                  key: SPROUT_USER
+            - name: SPROUT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: credentials
+                  key: SPROUT_PASSWORD
+          volumeMounts:
+          - mountPath: "/cfme/log_depot"
+            name: "artifacts"
+          - mountPath: "/playbooks/vars/"
+            name: "prt-configs"
+        volumes:
+        - name: "credentials"
+          secret:
+            secretName: credentials
+        - name: "artifacts"
+          persistentVolumeClaim:
+            claimName: "artifacts-pvc"
+        - name: "prt-configs"
+          configMap:
+            name: prt-configs
+            items:
+              - key: variables
+                path: variables.yml
+
+- apiVersion: batch/v1beta1
+  kind: CronJob
+  metadata:
+    name: "check-prs"
+    annotations:
+      "alpha.image.policy.openshift.io/resolve-names": "*"
+  spec:
+    concurrencyPolicy: Forbid
+    securityContext: {}
+    serviceAccount: prt
+    serviceAccountName: prt
+    successfulJobsHistoryLimit: 1
+    failedJobsHistoryLimit: 3
+    activeDeadlineSeconds: 1200
+    schedule: "*/10 * * * *"
+    jobTemplate:
+      spec:
+        template:
+          metadata:
+            labels:
+              parent: "check-prs-job"
+              name: "check-prs"
+          spec:
+            securityContext: {}
+            serviceAccount: prt
+            serviceAccountName: prt
+            containers:
+            - name: check-prs
+              image: "${NAME}:latest"
+              env:
+                - name: CFME_TESTS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: credentials
+                      key: .yaml_key
+                - name: YAYCL_CRYPT_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: credentials
+                      key: .yaml_key
+                - name: TRACKERBOT_USER
+                  valueFrom:
+                    secretKeyRef:
+                      name: credentials
+                      key: TRACKERBOT_USER
+                - name: TRACKERBOT_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: credentials
+                      key: TRACKERBOT_TOKEN
+                - name: GH_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: credentials
+                      key: GH_TOKEN
+
+              command: ["/bin/sh"]
+              args: ["-c", "source /cfme/cfme_venv/bin/activate && ansible-playbook /playbooks/check_prs.yml"]
+              volumeMounts:
+                - mountPath: "/playbooks/vars/"
+                  name: "prt-configs"
+                - mountPath: "/logs"
+                  name: "checkpr-logs"
+
+            terminationGracePeriodSeconds: "90"
+            restartPolicy: "Never"
+            volumes:
+              - name: "credentials"
+                secret:
+                  secretName: credentials
+              - name: "prt-configs"
+                configMap:
+                  name: prt-configs
+                  items:
+                    - key: variables
+                      path: variables.yml
+              - name: "checkpr-logs"
+                persistentVolumeClaim:
+                  claimName: "checkprs-pvc"
+
+#todo: add job for re-building image once a week
+
+parameters:
+- name: NAME
+  required: true
+  displayName: name which will be used everywhere to give objects names and add labels
+  description: name which will be used everywhere to give objects names and add labels
+  value: prt
+
+- name: SOURCE_REPOSITORY_URL
+  required: true
+  displayName: repo url with docker file
+  description: repo url with docker file
+  value: https://gitlab.cee.redhat.com/izapolsk/prt.git
+
+- name: SOURCE_REPOSITORY_REF
+  required: true
+  displayName: branch
+  description: branch
+  value: master

@@ -1,0 +1,226 @@
+---
+- hosts: localhost
+  any_errors_fatal: true
+  vars_files:
+    - vars/variables.yml
+  vars:
+    gpg: "{{ lookup('file','{{ cfme_data_dir }}/complete/gpg.yaml') | from_yaml }}"
+    ansible_python_interpreter: "{{ cfme_venv }}/bin/python"
+
+  tasks:
+    - include: plays/update_plays.yml
+    - include: plays/wait_for_task.yml watch_job="find task" watch_timeout=21600 watch_poll=300 watch_count=1
+
+    - name: starting tests against PR
+      block:
+      - name: setting test run id
+        set_fact:
+          test_id: "{{ picked_task['json']['objects'][0].tid }}"
+          pr: "{{ picked_task['json']['objects'][0].pr_number }}"
+          sprout_stream: "{{ picked_task['json']['objects'][0].stream }}"
+          sprout_description: "{{ picked_task['json']['objects'][0].tid }}"
+
+      - name: create log path
+        file:
+          path: "{{ log_depot }}/{{ test_id }}"
+          state: directory
+
+      - name: bind remote log_depot's folder to local logs folder
+        mount:
+          path: "{{ cfme_repo_dir }}/log"
+          src: "{{ log_depot }}/{{ test_id }}"
+          opts: bind
+          fstype: none
+          state: mounted
+
+      #TODO: replace below play with importing gpg keys from shared file
+      - set_fact:
+          gpg_keys: "{{ gpg.allowed_keys|map('truncate', 50, True, '')|map('regex_replace', ' ', '')|join(' ') }}"
+
+      - name: importing gpg certificates
+        command: "gpg --recv-keys --keyserver {{ item }} {{ gpg_keys }}"
+        register: task_result
+        with_random_choice: "{{ gpg.servers }}"
+        retries: 4
+        until: task_result is succeeded
+
+      - name: marking all imported gpg keys as trusted
+        command: gpg --list-keys --fingerprint --with-colons | sed -E -n -e 's/^fpr:::::::::([0-9A-F]+):$/\1:6:/p' | gpg --import-ownertrust
+        register: task_result
+
+      - name: fetch pr data from git
+        shell: "git fetch origin refs/pull/{{ pr }}/head:refs/remotes/origin/pr/{{ pr }}"
+        args:
+          chdir: "{{ cfme_repo_dir }}"
+
+      - name:
+        shell: "git merge --no-ff --no-edit --verify-signatures origin/pr/{{ pr }}"
+        args:
+          chdir: "{{ cfme_repo_dir }}"
+
+      - name: updating packages and etc according to PR changes
+        command: "python -m cfme.scripting.quickstart"
+        args:
+          chdir: "{{  cfme_repo_dir }}"
+        environment:
+          PIP_TRUSTED_HOST: "{{ wheel.host }}"
+          PIP_FIND_LINKS: "{{ wheel.url }}"
+
+      - name: looking for stale pyc files
+        find:
+          paths: "{{  cfme_repo_dir }}"
+          patterns: "*.pyc"
+        register: pyc_files
+
+      - name: removing stale pyc files if such exist
+        file:
+          path: "{{ item.path }}"
+          state: absent
+        with_items: "{{ pyc_files.files }}"
+
+      - name: get pr metadata
+        gh_pr:
+          command: "read"
+          number: "{{ pr }}"
+          organization: "{{ github.organization }}"
+          token: "{{ github.token }}"
+          repo: "{{ github.repo }}"
+        register: pr_metadata
+
+      - name: preparing pytest command based on metadata or whatever
+        block:
+          - name: pytest command from metadata
+            set_fact:
+              pytest_cmd: miq-runtest {{ pr_metadata['meta']['cmd']['pytest'] }}
+            when: pr_metadata.meta.cmd | length > 0
+
+          - name: pytest command based on modified files
+            set_fact:
+              pytest_cmd: miq-runtest -v --use-provider default --long-running --perf {{ pr_metadata.meta.modified_files | join(' ') }}
+            when:
+             - not(pr_metadata.meta.cmd | length > 0)
+             - pr_metadata.meta.modified_files | length > 0
+
+          - name: default pytest command
+            set_fact:
+              pytest_cmd: miq-runtest -v --use-provider default -m smoke
+            when:
+             - not(pr_metadata.meta.modified_files | length > 0)
+             - not(pr_metadata.meta.cmd | length > 0)
+
+          - debug:
+              var: pytest_cmd
+
+          - name: running test itself
+            block:
+              - name: prepare env.local.yaml
+                template:
+                  src: "templates/env.local.yaml"
+                  dest: "{{ cfme_repo_dir }}/conf/env.local.yaml"
+
+              - name: collect only run
+                shell: |
+                  . {{ cfme_venv }}/bin/activate
+                  miq-runtest --collectonly --dummy-appliance --dummy-appliance-version {{ sprout_stream }} --use-provider complete
+                args:
+                  chdir: "{{ cfme_repo_dir }}"
+                environment:
+                  MIQ_RUNTEST_QUICKSTART_DONE: "Of course done"
+                register: test_run_collectonly_data
+
+              - name: populate configs with appliances
+                shell: |
+                  . {{ cfme_venv }}/bin/activate
+                  miq sprout checkout --populate-yaml --user-key sprout --group {{ sprout_stream }}
+                args:
+                  chdir: "{{ cfme_repo_dir }}"
+                environment:
+                  MIQ_RUNTEST_QUICKSTART_DONE: "Of course done"
+                register: appliance_populate_data
+                async: 21600   # 6 hours
+                poll: 0
+
+              - name: waiting for appliance from sprout
+                wait_for:
+                  timeout: 600  # wait for max 10 min
+                  delay: 30     # start checking after 30 seconds
+                  sleep: 60     # sleep 60 seconds after every attempt
+                  path: "{{ cfme_repo_dir }}/conf/env.local.yaml"
+                  search_regex: hostname:\s+\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}
+
+              - name: run pytest cmd
+                shell: |
+                  . {{ cfme_venv }}/bin/activate
+                  {{ pytest_cmd }}
+
+                args:
+                  chdir: "{{ cfme_repo_dir }}"
+                register: test_run_data
+                environment:
+                  MIQ_RUNTEST_QUICKSTART_DONE: "Of course done"
+                  SPROUT_USER: "{{ sprout.user }}"
+                  SPROUT_PASSWORD: "{{ sprout.password }}"
+                ignore_errors: true
+
+              - set_fact:
+                  formatted_test_results: {'cmd': "{{ test_run_data.cmd }}",
+                                           'exit_code': '{{ test_run_data.rc }}',
+                                           'start_time':  '{{ test_run_data.start }}',
+                                           'end_time': '{{ test_run_data.end }}',
+                                           'stderr': '{{ test_run_data.stderr_lines }}',
+                                           'stdout': '{{ test_run_data.stdout_lines }}'}
+
+              - name: show run test results
+                debug:
+                  var: formatted_test_results
+
+              - name: preparing test run results
+                block:
+                  - name: set test result to passed
+                    set_fact:
+                      test_run_result: "passed"
+                    when: test_run_data.rc|int == 0 or test_run_data.rc|int == 5
+                  - name: set test result to passed
+                    set_fact:
+                      test_run_result: "failed"
+                    when: test_run_data.rc|int != 0 and test_run_data.rc|int != 5
+
+                  - name: display final result
+                    debug:
+                      var: test_run_result
+
+              - name: update task status to finished and unlock task
+                uri:
+                  url: "{{ trackerbot.host }}/task/{{ picked_task['json']['objects'][0].tid }}/"
+                  method: PATCH
+                  headers:
+                    Content-Type: 'application/json'
+                  body_format: json
+                  body: {"result":"{{ test_run_result }}","locked_by":"","locked":false, "output":"{{ lookup('file', '{{ base_dir }}/ansible.log') }}"}
+                  status_code: 202
+                  return_context: yes
+
+              # todo: add coverage when it is implemented
+
+            rescue:
+              - name: update task status to finished with error
+                uri:
+                  url: "{{ trackerbot.host }}/task/{{ picked_task['json']['objects'][0].tid }}/"
+                  method: PATCH
+                  headers:
+                    Content-Type: 'application/json'
+                  body_format: json
+                  body: {"result": "failed","locked_by":"","locked":false,"output":"{{ lookup('file', '{{ base_dir }}/ansible.log') }}"}
+                  status_code: 202
+                  return_context: yes
+            always:
+               - name: kill checkout sprout process
+                 shell: pkill -f "miq sprout checkout"
+                 ignore_errors: yes
+
+               - name: copy playbook log
+                 copy:
+                   src: "{{ base_dir }}/ansible.log"
+                   dest: "{{ cfme_repo_dir }}/log"
+
+

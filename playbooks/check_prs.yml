@@ -1,0 +1,66 @@
+---
+- hosts: localhost
+  any_errors_fatal: true
+  vars_files:
+    - vars/variables.yml
+  vars:
+    ansible_python_interpreter: "{{ cfme_venv }}/bin/python"
+
+  # todo: create trackerbot ansible module instead
+  tasks:
+    - name: looking for PRs demanding testing
+      block:
+      - name: get all PRs
+        gh_pr:
+          command: list
+          organization: "{{ github.organization }}"
+          token: "{{ github.token }}"
+          repo: "{{ github.repo }}"
+          filter:
+            state: open
+        register: open_prs
+
+      - set_fact:
+          open_prs: "{{ open_prs['meta'] }}"
+
+      - name: iterate over found open prs
+        with_items: "{{ open_prs }}"
+        include_tasks: plays/check_certain_pr.yml
+        vars:
+          open_pr: "{{ item }}"
+
+      - name: close trackerbot prs which have been closed in GH
+        block:
+          - name: get trackerbot prs
+            uri:
+              url: "{{ trackerbot.host }}/pr/?limit=0&closed=false"
+              method: GET
+            register: bot_prs
+
+          - set_fact:
+             gh_pr_num: "{{ open_prs | map(attribute='number')|list }}"
+             bot_pr_num: "{{ bot_prs['json']['objects'] | map(attribute='number')|list }}"
+
+          - set_fact:
+             prs_to_close: "{{ bot_pr_num | difference(gh_pr_num) }}"
+
+          - name: mark closed PR as closed in trackerbot
+            uri:
+              url: "{{ trackerbot.host }}/pr/{{ item }}/"
+              method: PATCH
+              headers:
+                Content-Type: 'application/json'
+              body_format: json
+              body: {"closed":true}
+              status_code: 202
+              return_context: yes
+            with_items: "{{ prs_to_close }}"
+
+      always:
+        - set_fact:
+            logfile: "{{ lookup('env','HOSTNAME') }}.log"
+
+        - name: copy playbook log
+          copy:
+            src: "{{ base_dir }}/ansible.log"
+            dest: "/logs/{{ logfile }}"

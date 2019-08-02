@@ -1,0 +1,14 @@
+---
+- set_fact:
+    run_status: "{{ run_item['status'] }}"
+
+- name: if run is pending, iterate thru tasks
+  with_items: "{{ run_item['tasks'] }}"
+  loop_control:
+    loop_var: task_item
+  include_tasks: set_invalid_task.yml
+  vars:
+    cur_task: "{{ task_item }}"
+  when:  run_status == "pending"
+
+

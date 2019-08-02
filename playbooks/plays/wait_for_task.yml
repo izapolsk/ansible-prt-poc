@@ -1,0 +1,25 @@
+---
+- name: 'checking {{ watch_job }} status (recursive)'
+  include_tasks: 'find_task.yml'
+
+- name: 'count ({{ watch_count | int + 1 }})'
+  set_fact:
+    watch_count: '{{ watch_count | int + 1 }}'
+
+- name: 'retries ({{ (watch_timeout | int / watch_poll | int) | int }})'
+  set_fact:
+    watch_retries: '{{ (watch_timeout | int / watch_poll | int) | int }}'
+
+- name: 'timeout ({{ watch_timeout }} seconds)'
+  fail:
+    msg: "Timeout of {{ watch_timeout }} seconds exceeded ({{ watch_retries }} retries)"
+  when: ((locked_task.skipped is defined and locked_task.skipped) or (locked_task.failed is defined and locked_task.failed)) and (watch_count | int > watch_retries | int)
+
+- name: 'wait for {{ watch_poll }} seconds'
+  wait_for:
+    timeout: '{{ watch_poll | int }}'
+  when: (locked_task.skipped is defined and locked_task.skipped) or (locked_task.failed is defined and locked_task.failed)
+
+- name: 'call itself recursively'
+  include_tasks: 'wait_for_task.yml'
+  when: (locked_task.skipped is defined and locked_task.skipped) or (locked_task.failed is defined and locked_task.failed)

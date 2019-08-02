@@ -1,0 +1,14 @@
+---
+- set_fact:
+    new_tid: "{{ lookup('password', '/dev/null length=8 chars=ascii_letters,digits') }}"
+
+- name: create new task
+  uri:
+    url: "{{ trackerbot.host }}/task/"
+    method: POST
+    headers:
+      Content-Type: 'application/json'
+    body_format: json
+    body: {"tid": "{{ new_tid }}","datestamp":"{{ ansible_date_time.iso8601 }}","result":"pending","stream":"{{ cur_group }}","run":"{{ run_uri }}"}
+    status_code: 201
+    return_context: yes

@@ -1,0 +1,41 @@
+allowHostDirVolumePlugin: false
+allowHostIPC: false
+allowHostNetwork: false
+allowHostPID: false
+allowHostPorts: false
+allowPrivilegedContainer: true 
+allowedCapabilities: null
+allowedFlexVolumes: null
+apiVersion: v1
+defaultAddCapabilities:
+- SYS_ADMIN
+fsGroup:
+  type: RunAsAny
+groups:
+- system:cluster-admins
+kind: SecurityContextConstraints
+metadata:
+  annotations:
+    kubernetes.io/description: anyuid provides all features of the restricted SCC
+      but allows users to run with any UID and any GID.
+  creationTimestamp: null
+  name: enhanced-anyuid
+priority: 10
+readOnlyRootFilesystem: false
+requiredDropCapabilities:
+- MKNOD
+runAsUser:
+  type: RunAsAny
+seLinuxContext:
+  type: MustRunAs
+supplementalGroups:
+  type: RunAsAny
+users:
+- system:serviceaccount:prt:prt
+volumes:
+- configMap
+- downwardAPI
+- emptyDir
+- persistentVolumeClaim
+- projected
+- secret

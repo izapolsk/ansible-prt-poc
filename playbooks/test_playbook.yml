@@ -1,0 +1,35 @@
+---
+- hosts: localhost
+  any_errors_fatal: true
+  vars:
+    gpg: "{{ lookup('file','{{ cfme_data_dir }}/complete/gpg.yaml') | from_yaml }}"
+  vars_files:
+    - vars/variables.yml
+  tasks:
+    - set_fact:
+        gpg_keys: "{{ gpg.allowed_keys|map('truncate', 50, True, '')|map('regex_replace', ' ', '')|join(' ') }}"
+        pr: "8910"
+
+    - name: importing gpg certificates
+      command: "gpg --recv-keys --keyserver {{ item }} {{ gpg_keys }}"
+      register: task_result
+      with_random_choice: "{{ gpg.servers }}"
+      retries: 4
+      until: task_result is succeeded
+
+    - name: marking all imported gpg keys as trusted
+      command: gpg --list-keys --fingerprint --with-colons | sed -E -n -e 's/^fpr:::::::::([0-9A-F]+):$/\1:6:/p' | gpg --import-ownertrust
+      register: task_result
+
+    - name: fetch pr data from git
+      shell: "git fetch origin refs/pull/{{ pr }}/head:refs/remotes/origin/pr/{{ pr }}"
+      args:
+        chdir: "{{ cfme_repo_dir }}"
+
+    - name:
+      shell: "git merge --no-ff --no-edit --verify-signatures origin/pr/{{ pr }}"
+      args:
+        chdir: "{{ cfme_repo_dir }}"
+
+    - debug:
+        msg: "result"

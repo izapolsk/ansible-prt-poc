@@ -1,0 +1,40 @@
+---
+#- hosts: localhost
+#  any_errors_fatal: true
+#  vars_files:
+#    - ../vars/variables.yml
+#
+#  tasks:
+
+- name: create new run
+  uri:
+    url: "{{ trackerbot.host }}/run/"
+    method: POST
+    headers:
+      Content-Type: 'application/json'
+    body_format: json
+    body: {"pr": "/api/pr/{{ pr_num }}/","datestamp":"{{ ansible_date_time.iso8601 }}","commit":"{{ last_commit }}"}
+    status_code: 201
+    return_context: yes
+  register: created_run
+
+- name: get trackerbot groups
+  uri:
+    url: "{{ trackerbot.host }}/group/?stream=true&use_for_prt=true"
+    method: GET
+  register: got_groups
+
+- name: retrieving groups
+  set_fact:
+    cur_groups: "{{ got_groups['json']['objects'] }}"
+
+- name: iterate over groups
+  with_items: "{{ cur_groups }}"
+  loop_control:
+    loop_var: group_item
+  include_tasks: create_task.yml
+  vars:
+    cur_group: "{{ group_item.name }}"
+    run_uri: "{{ created_run['json']['resource_uri'] }}"
+
+

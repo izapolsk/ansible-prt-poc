@@ -1,0 +1,48 @@
+base_dir: /cfme
+
+cfme_repo: https://github.com/ManageIQ/integration_tests.git
+cfme_branch: master
+cfme_repo_dir: "{{ base_dir }}/cfme_tests"
+
+cfme_data_repo: https://gitlab.cee.redhat.com/cfme-qe/cfme-qe-yamls.git
+cfme_data_branch: master
+cfme_data_dir: "{{ base_dir }}/cfme-qe-yamls"
+
+cfme_venv: "{{ base_dir }}/cfme_venv"
+log_depot: "{{ base_dir }}/log_depot"
+
+artifactor:
+  host: 127.0.0.1
+  port: 55555
+  local_dir: "{{ cfme_repo_dir }}/log"
+  remote_dir: ""
+
+wharf:
+  host: http://wharf_host:4899/
+
+wheel:
+  url: http://wheel_host/wheelhouse/
+  host: wheel_host
+
+trackerbot:
+  host: trackerbot_host
+  username: "{{ lookup('env','TRACKERBOT_USER') }}"
+  apikey: "{{ lookup('env','TRACKERBOT_TOKEN') }}"
+
+github:
+  organization: ManageIQ
+  token: some_token
+  repo: integration_tests
+
+sprout:
+  host: sprout_host
+  port: 80
+  user: "{{ lookup('env','SPROUT_USER') }}"
+  password: "{{ lookup('env','SPROUT_PASSWORD') }}"
+
+browser: chrome
+
+smtp: 25
+json: 5555
+
+slave_name: "{{ lookup('env','HOSTNAME') }}"

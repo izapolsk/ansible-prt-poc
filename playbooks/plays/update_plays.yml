@@ -1,0 +1,15 @@
+- name: clone or update integration tests repo
+  git:
+    repo: "{{ cfme_repo }}"
+    dest: "{{ cfme_repo_dir }}"
+    version: "{{ cfme_branch }}"
+    force: true
+
+- name: clone or update yamls
+  git:
+    repo: "{{ cfme_data_repo }}"
+    dest: "{{ cfme_data_dir }}"
+    version: "{{ cfme_data_branch }}"
+    force: true
+  environment:
+    GIT_SSL_NO_VERIFY: true

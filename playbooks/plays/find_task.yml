@@ -1,0 +1,20 @@
+---
+- name: get first available task
+  uri:
+    url: "{{ trackerbot.host }}/task/?limit=1&result=pending&locked=false"
+    method: GET
+  register: picked_task
+
+- name: lock task and update its status to running in trackerbot
+  when: picked_task['json']['objects'] is defined and picked_task['json']['objects'] | length > 0
+  uri:
+    url: "{{ trackerbot.host }}/task/{{ picked_task['json']['objects'][0].tid }}/"
+    method: PATCH
+    headers:
+      Content-Type: 'application/json'
+    body_format: json
+    body: {"locked_by":"{{ slave_name }}","locked":true,
+           "provider": "Sprout","vm_name":"Sprout","template":"Sprout","result": "running"}
+    status_code: 202
+    return_context: yes
+  register: locked_task

@@ -1,0 +1,23 @@
+---
+#
+#- hosts: localhost
+#  any_errors_fatal: true
+#  vars_files:
+#    - ../vars/variables.yml
+#
+#  tasks:
+- name: "get trackerbot runs for PR {{ pr_num }}"
+  uri:
+    url: "{{ trackerbot.host }}/run/?order_by=-datestamp&pr__number={{ pr_num }}"
+    method: GET
+  register: got_runs
+
+- name: retrieving runs
+  set_fact:
+    cur_pr_runs: "{{ got_runs['json']['objects'] }}"
+
+- name: setting all runs as invalid
+  with_items: "{{ cur_pr_runs }}"
+  loop_control:
+    loop_var: run_item
+  include_tasks: set_invalid_run.yml

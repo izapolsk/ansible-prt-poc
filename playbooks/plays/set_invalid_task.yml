@@ -1,0 +1,11 @@
+---
+- name: "set task {{ cur_task.tid }} as invalid"
+  uri:
+    url: "{{ trackerbot.host }}/task/{{ cur_task.tid }}/"
+    method: PATCH
+    headers:
+      Content-Type: 'application/json'
+    body_format: json
+    body: {"result": "invalid","locked_by":"","locked":false,"cleanup":false}
+    status_code: 202
+    return_context: yes
